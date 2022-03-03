@@ -1,1 +1,5 @@
 /target
+*.fa
+*.lay
+*.normal_index
+*.hoco_index
