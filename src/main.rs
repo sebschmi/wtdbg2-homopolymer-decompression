@@ -23,6 +23,15 @@ struct Configuration {
     /// A fasta file containing the homopolymer-compressed reads.
     #[clap(long, parse(from_os_str))]
     hoco_reads: PathBuf,
+
+    /// The size of the buffers between threads.
+    #[clap(long, default_value = "32768")]
+    buffer_size: usize,
+
+    /// The number of compute threads to use for decompression.
+    /// Note that the input and output threads are not counted under this number.
+    #[clap(long, default_value = "1")]
+    threads: usize,
 }
 
 fn initialise_logging() {
@@ -49,11 +58,11 @@ fn main() {
 
     info!("Building reads sequence indices...");
     let (normal_sequence_index, hoco_sequence_index) = crossbeam::scope(|scope| {
-        let normal_sequence_index = scope.builder().name("normal_index_builder_thread".to_string()).spawn(|_| {
-            FastaSequenceIndex::build(configuration.normal_reads, normal_sequence_index_path)
+        let normal_sequence_index = scope.builder().name("normal_index_builder_thread".to_string()).spawn(|scope| {
+            FastaSequenceIndex::build_parallel(configuration.normal_reads, normal_sequence_index_path, scope, configuration.buffer_size)
         }).unwrap();
-        let hoco_sequence_index = scope.builder().name("hoco_index_builder_thread".to_string()).spawn(|_| {
-            FastaSequenceIndex::build(configuration.hoco_reads, hoco_sequence_index_path)
+        let hoco_sequence_index = scope.builder().name("hoco_index_builder_thread".to_string()).spawn(|scope| {
+            FastaSequenceIndex::build_parallel(configuration.hoco_reads, hoco_sequence_index_path, scope, configuration.buffer_size)
         }).unwrap();
 
         (normal_sequence_index.join().unwrap(), hoco_sequence_index.join().unwrap())
