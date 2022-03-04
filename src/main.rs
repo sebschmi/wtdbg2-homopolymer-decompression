@@ -1,8 +1,8 @@
-use std::path::PathBuf;
-use log::{info, LevelFilter};
-use simplelog::{ColorChoice, TerminalMode, TermLogger};
-use clap::Parser;
 use crate::fasta_sequence_index::FastaSequenceIndex;
+use clap::Parser;
+use log::{info, LevelFilter};
+use simplelog::{ColorChoice, TermLogger, TerminalMode};
+use std::path::PathBuf;
 
 mod fasta_sequence_index;
 
@@ -41,7 +41,7 @@ fn initialise_logging() {
         TerminalMode::Stderr,
         ColorChoice::Auto,
     )
-        .unwrap();
+    .unwrap();
     info!("Logging initialised successfully")
 }
 
@@ -57,19 +57,45 @@ fn main() {
     let hoco_sequence_index_path = hoco_sequence_index_path;
 
     info!("Building reads sequence indices...");
+    // parallel builds seem to be a little faster on my laptop.
     let (normal_sequence_index, hoco_sequence_index) = crossbeam::scope(|scope| {
-        let normal_sequence_index = scope.builder().name("normal_index_builder_thread".to_string()).spawn(|scope| {
-            FastaSequenceIndex::build_parallel(configuration.normal_reads, normal_sequence_index_path, scope, configuration.buffer_size)
-        }).unwrap();
-        let hoco_sequence_index = scope.builder().name("hoco_index_builder_thread".to_string()).spawn(|scope| {
-            FastaSequenceIndex::build_parallel(configuration.hoco_reads, hoco_sequence_index_path, scope, configuration.buffer_size)
-        }).unwrap();
+        let normal_sequence_index = scope
+            .builder()
+            .name("normal_index_builder_thread".to_string())
+            .spawn(|scope| {
+                FastaSequenceIndex::build_parallel(
+                    configuration.normal_reads,
+                    normal_sequence_index_path,
+                    scope,
+                    configuration.buffer_size,
+                )
+                //FastaSequenceIndex::build(configuration.normal_reads, normal_sequence_index_path)
+            })
+            .unwrap();
+        let hoco_sequence_index = scope
+            .builder()
+            .name("hoco_index_builder_thread".to_string())
+            .spawn(|scope| {
+                FastaSequenceIndex::build_parallel(
+                    configuration.hoco_reads,
+                    hoco_sequence_index_path,
+                    scope,
+                    configuration.buffer_size,
+                )
+                //FastaSequenceIndex::build(configuration.hoco_reads, hoco_sequence_index_path)
+            })
+            .unwrap();
 
-        (normal_sequence_index.join().unwrap(), hoco_sequence_index.join().unwrap())
-    }).unwrap();
+        (
+            normal_sequence_index.join().unwrap(),
+            hoco_sequence_index.join().unwrap(),
+        )
+    })
+    .unwrap();
     info!("Built reads sequence indices");
 
     crossbeam::scope(|scope| {
         // TODO
-    }).unwrap();
+    })
+    .unwrap();
 }
