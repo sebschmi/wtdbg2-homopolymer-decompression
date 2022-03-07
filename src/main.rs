@@ -7,7 +7,7 @@ use log::{info, LevelFilter};
 use simplelog::{ColorChoice, TermLogger, TerminalMode};
 use std::collections::BTreeMap;
 use std::fs;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -70,7 +70,12 @@ fn main() {
     contig_tmp_path.push(".current_contig");
     let contig_tmp_path = contig_tmp_path;
     // Create/open the files here already to abort early if it cannot be created.
-    let tmp_file = File::create(&contig_tmp_path).unwrap();
+    let tmp_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&contig_tmp_path)
+        .unwrap();
     let input_file = File::open(&configuration.input).unwrap();
     let output_file = File::create(&configuration.output).unwrap();
 
@@ -132,27 +137,33 @@ fn main() {
                         let mut new_context = context.clone();
                         match line {
                             Wtdbg2CtgLayLine::Contig { .. } => {
-                                new_context.previous_contig_edge_count =
-                                    Some((new_context.edge_index).try_into().unwrap());
-                                new_context.previous_edge_alignment_count =
-                                    Some((new_context.alignment_index).try_into().unwrap());
+                                if new_context.contig_index != -1 {
+                                    new_context.previous_contig_edge_count = new_context.edge_index;
+                                    new_context.previous_edge_alignment_count =
+                                        new_context.alignment_index;
+                                }
                                 new_context.contig_index += 1;
-                                new_context.edge_index = 0;
-                                new_context.alignment_index = 0;
+                                new_context.edge_index = -1;
+                                new_context.alignment_index = -1;
                                 decompressed_alignment_sender
                                     .send((Wtdbg2CtgLayLineWithContext { line, context }, None))
                                     .unwrap();
                             }
                             Wtdbg2CtgLayLine::Edge { .. } => {
-                                new_context.previous_edge_alignment_count =
-                                    Some((new_context.alignment_index).try_into().unwrap());
+                                assert!(new_context.contig_index >= 0);
+                                if new_context.edge_index != -1 {
+                                    new_context.previous_edge_alignment_count =
+                                        new_context.alignment_index;
+                                }
                                 new_context.edge_index += 1;
-                                new_context.alignment_index = 0;
+                                new_context.alignment_index = -1;
                                 decompressed_alignment_sender
                                     .send((Wtdbg2CtgLayLineWithContext { line, context }, None))
                                     .unwrap();
                             }
                             Wtdbg2CtgLayLine::Alignment { .. } => {
+                                assert!(new_context.contig_index >= 0);
+                                assert!(new_context.edge_index >= 0);
                                 new_context.alignment_index += 1;
                                 alignment_sender
                                     .send(Wtdbg2CtgLayLineWithContext { line, context })
@@ -383,7 +394,7 @@ fn main() {
     // Remove tmp file as it is not needed anymore.
     fs::remove_file(&contig_tmp_path).unwrap();
 
-    info!("Done")
+    info!("Done");
 }
 
 pub fn reverse_complement<

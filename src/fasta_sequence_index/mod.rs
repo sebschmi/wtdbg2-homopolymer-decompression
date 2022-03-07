@@ -2,7 +2,7 @@ use bio::io::fasta;
 use crossbeam::channel;
 use crossbeam::thread::Scope;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -26,7 +26,15 @@ impl FastaSequenceIndex {
         io_buffer_size: usize,
     ) -> Self {
         let reader = fasta::Reader::with_capacity(io_buffer_size, File::open(input_file).unwrap());
-        let mut writer = BufWriter::with_capacity(io_buffer_size, File::create(tmp_file).unwrap());
+        let mut writer = BufWriter::with_capacity(
+            io_buffer_size,
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(tmp_file)
+                .unwrap(),
+        );
         let mut index = HashMap::new();
 
         let mut offset = 0;
@@ -58,7 +66,15 @@ impl FastaSequenceIndex {
         io_buffer_size: usize,
     ) -> Self {
         let reader = fasta::Reader::with_capacity(io_buffer_size, File::open(input_file).unwrap());
-        let mut writer = BufWriter::with_capacity(io_buffer_size, File::create(tmp_file).unwrap());
+        let mut writer = BufWriter::with_capacity(
+            io_buffer_size,
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(tmp_file)
+                .unwrap(),
+        );
         let (sender, receiver) = channel::bounded(channel_size);
 
         // Reader thread.
@@ -100,6 +116,7 @@ impl FastaSequenceIndex {
 
         let buffer = output.as_mut_ptr();
         let capacity = output.capacity();
+        assert!(capacity >= file_slice.len);
 
         self.file
             .read_exact_at(

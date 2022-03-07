@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::num::NonZeroU64;
 use std::str::FromStr;
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -42,10 +41,19 @@ impl FromStr for Wtdbg2CtgLayLine {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.chars().next() {
             Some('>') => {
-                let mut columns = s[1..].split('\t');
-                let name = columns.next().ok_or(())?.to_owned();
-                let node_count = columns.next().ok_or(())?[6..].parse().map_err(|_| ())?;
-                let length = columns.next().ok_or(())?[4..].parse().map_err(|_| ())?;
+                let mut columns = s[1..].split(' ');
+                let name = columns.next().ok_or(()).unwrap().to_owned();
+                let node_count = columns
+                    .next()
+                    .ok_or(())
+                    .unwrap_or_else(|_| panic!("Parse error: {s}"))[6..]
+                    .parse()
+                    .map_err(|_| ())
+                    .unwrap();
+                let length = columns.next().ok_or(()).unwrap()[4..]
+                    .parse()
+                    .map_err(|_| ())
+                    .unwrap();
                 Ok(Self::Contig {
                     name,
                     node_count,
@@ -54,19 +62,25 @@ impl FromStr for Wtdbg2CtgLayLine {
             }
             Some('E') => {
                 let mut columns = s[1..].split('\t');
-                columns.next().ok_or(())?;
-                let offset = columns.next().ok_or(())?.parse().map_err(|_| ())?;
-                let from_node = columns.next().ok_or(())?.to_owned();
-                let from_direction = match columns.next().ok_or(())? {
+                columns.next().ok_or(()).unwrap();
+                let offset = columns
+                    .next()
+                    .ok_or(())
+                    .unwrap()
+                    .parse()
+                    .map_err(|_| ())
+                    .unwrap();
+                let from_node = columns.next().ok_or(()).unwrap().to_owned();
+                let from_direction = match columns.next().ok_or(()).unwrap() {
                     "+" => true,
                     "-" => false,
-                    _ => return Err(()),
+                    _ => panic!("Parse error: {s}"),
                 };
-                let to_node = columns.next().ok_or(())?.to_owned();
-                let to_direction = match columns.next().ok_or(())? {
+                let to_node = columns.next().ok_or(()).unwrap().to_owned();
+                let to_direction = match columns.next().ok_or(()).unwrap() {
                     "+" => true,
                     "-" => false,
-                    _ => return Err(()),
+                    _ => panic!("Parse error: {s}"),
                 };
                 Ok(Self::Edge {
                     offset,
@@ -78,15 +92,27 @@ impl FromStr for Wtdbg2CtgLayLine {
             }
             Some('S') => {
                 let mut columns = s[1..].split('\t');
-                columns.next().ok_or(())?;
-                let read_id = columns.next().ok_or(())?.as_bytes().to_owned();
-                let direction = match columns.next().ok_or(())? {
+                columns.next().ok_or(()).unwrap();
+                let read_id = columns.next().ok_or(()).unwrap().as_bytes().to_owned();
+                let direction = match columns.next().ok_or(()).unwrap() {
                     "+" => true,
                     "-" => false,
-                    _ => return Err(()),
+                    _ => panic!("Parse error: {s}"),
                 };
-                let offset = columns.next().ok_or(())?.parse().map_err(|_| ())?;
-                let length = columns.next().ok_or(())?.parse().map_err(|_| ())?;
+                let offset = columns
+                    .next()
+                    .ok_or(())
+                    .unwrap()
+                    .parse()
+                    .map_err(|_| ())
+                    .unwrap();
+                let length = columns
+                    .next()
+                    .ok_or(())
+                    .unwrap()
+                    .parse()
+                    .map_err(|_| ())
+                    .unwrap();
                 Ok(Self::Alignment {
                     read_id,
                     direction,
@@ -95,7 +121,7 @@ impl FromStr for Wtdbg2CtgLayLine {
                     original_length: length,
                 })
             }
-            _ => Err(()),
+            _ => panic!("Parse error: {s}"),
         }
     }
 }
@@ -164,13 +190,13 @@ impl ToString for Wtdbg2CtgLayLine {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, Default)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct LineContext {
-    pub contig_index: u64,
-    pub edge_index: u64,
-    pub alignment_index: u64,
-    pub previous_contig_edge_count: Option<NonZeroU64>,
-    pub previous_edge_alignment_count: Option<NonZeroU64>,
+    pub contig_index: i64,
+    pub edge_index: i64,
+    pub alignment_index: i64,
+    pub previous_contig_edge_count: i64,
+    pub previous_edge_alignment_count: i64,
 }
 
 impl LineContext {
@@ -180,14 +206,14 @@ impl LineContext {
                 return false;
             }
 
-            self.edge_index == other.previous_contig_edge_count.unwrap().get()
-                && self.alignment_index == other.previous_edge_alignment_count.unwrap().get()
+            self.edge_index == other.previous_contig_edge_count
+                && self.alignment_index == other.previous_edge_alignment_count
         } else if self.edge_index != other.edge_index {
             if self.edge_index != other.edge_index - 1 {
                 return false;
             }
 
-            self.alignment_index == other.previous_edge_alignment_count.unwrap().get()
+            self.alignment_index == other.previous_edge_alignment_count
         } else if self.alignment_index != other.alignment_index {
             if self.alignment_index != other.alignment_index - 1 {
                 return false;
@@ -196,6 +222,18 @@ impl LineContext {
             true
         } else {
             false
+        }
+    }
+}
+
+impl Default for LineContext {
+    fn default() -> Self {
+        Self {
+            contig_index: -1,
+            edge_index: -1,
+            alignment_index: -1,
+            previous_contig_edge_count: 0,
+            previous_edge_alignment_count: 0,
         }
     }
 }
