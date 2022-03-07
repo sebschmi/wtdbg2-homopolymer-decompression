@@ -3,7 +3,7 @@ use crate::fasta_sequence_index::FastaSequenceIndex;
 use crate::wtdbg2_ctg_lay::{LineContext, Wtdbg2CtgLayLine, Wtdbg2CtgLayLineWithContext};
 use clap::Parser;
 use crossbeam::channel;
-use log::{info, LevelFilter};
+use log::{info, trace, LevelFilter};
 use simplelog::{ColorChoice, TermLogger, TerminalMode};
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,7 +16,7 @@ mod decompress;
 mod fasta_sequence_index;
 mod wtdbg2_ctg_lay;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 struct Configuration {
     /// The input file. Must be in wtdbg2's .ctg.lay format.
     #[clap(long, parse(from_os_str))]
@@ -81,25 +81,28 @@ fn main() {
 
     info!("Building reads sequence indices...");
     // parallel builds seem to be a little faster on my laptop.
-    let mut normal_sequence_index = crossbeam::scope(|scope| {
-        let normal_sequence_index = scope
-            .builder()
-            .name("normal_index_builder_thread".to_string())
-            .spawn(|scope| {
-                FastaSequenceIndex::build_parallel(
-                    configuration.normal_reads,
-                    normal_sequence_index_path,
-                    scope,
-                    configuration.queue_size,
-                    configuration.io_buffer_size,
-                )
-                //FastaSequenceIndex::build(configuration.normal_reads, normal_sequence_index_path, configuration.io_buffer_size)
-            })
-            .unwrap();
+    let mut normal_sequence_index = {
+        let configuration = configuration.clone();
+        crossbeam::scope(|scope| {
+            let normal_sequence_index = scope
+                .builder()
+                .name("normal_index_builder_thread".to_string())
+                .spawn(|scope| {
+                    FastaSequenceIndex::build_parallel(
+                        configuration.normal_reads,
+                        normal_sequence_index_path,
+                        scope,
+                        configuration.queue_size,
+                        configuration.io_buffer_size,
+                    )
+                    //FastaSequenceIndex::build(configuration.normal_reads, normal_sequence_index_path, configuration.io_buffer_size)
+                })
+                .unwrap();
 
-        normal_sequence_index.join().unwrap()
-    })
-    .unwrap();
+            normal_sequence_index.join().unwrap()
+        })
+        .unwrap()
+    };
     info!("Built read sequence indices");
 
     info!("Decompressing...");
@@ -110,10 +113,13 @@ fn main() {
             .builder()
             .name("input_reader".to_string())
             .spawn(move |_| {
+                let mut line_number = 0;
                 for line in
                     BufReader::with_capacity(configuration.io_buffer_size, input_file).lines()
                 {
                     let line = line.unwrap();
+                    line_number += 1;
+                    trace!("Read line {line_number}");
                     input_sender.send(line).unwrap();
                 }
             })
@@ -134,43 +140,59 @@ fn main() {
                     while let Ok(input) = input_receiver.recv() {
                         let line = Wtdbg2CtgLayLine::from_str(&input)
                             .unwrap_or_else(|_| panic!("Could not parse: {input}"));
-                        let mut new_context = context.clone();
                         match line {
                             Wtdbg2CtgLayLine::Contig { .. } => {
-                                if new_context.contig_index != -1 {
-                                    new_context.previous_contig_edge_count = new_context.edge_index;
-                                    new_context.previous_edge_alignment_count =
-                                        new_context.alignment_index;
+                                trace!("Parsed contig line {input}");
+                                if context.contig_index != -1 {
+                                    context.previous_contig_edge_count = context.edge_index + 1;
+                                    context.previous_edge_alignment_count =
+                                        context.alignment_index + 1;
                                 }
-                                new_context.contig_index += 1;
-                                new_context.edge_index = -1;
-                                new_context.alignment_index = -1;
+                                context.contig_index += 1;
+                                context.edge_index = -1;
+                                context.alignment_index = -1;
                                 decompressed_alignment_sender
-                                    .send((Wtdbg2CtgLayLineWithContext { line, context }, None))
+                                    .send((
+                                        Wtdbg2CtgLayLineWithContext {
+                                            line,
+                                            context: context.clone(),
+                                        },
+                                        None,
+                                    ))
                                     .unwrap();
                             }
                             Wtdbg2CtgLayLine::Edge { .. } => {
-                                assert!(new_context.contig_index >= 0);
-                                if new_context.edge_index != -1 {
-                                    new_context.previous_edge_alignment_count =
-                                        new_context.alignment_index;
+                                trace!("Parsed edge line {input}");
+                                assert!(context.contig_index >= 0);
+                                if context.edge_index != -1 {
+                                    context.previous_edge_alignment_count =
+                                        context.alignment_index + 1;
                                 }
-                                new_context.edge_index += 1;
-                                new_context.alignment_index = -1;
+                                context.edge_index += 1;
+                                context.alignment_index = -1;
                                 decompressed_alignment_sender
-                                    .send((Wtdbg2CtgLayLineWithContext { line, context }, None))
+                                    .send((
+                                        Wtdbg2CtgLayLineWithContext {
+                                            line,
+                                            context: context.clone(),
+                                        },
+                                        None,
+                                    ))
                                     .unwrap();
                             }
                             Wtdbg2CtgLayLine::Alignment { .. } => {
-                                assert!(new_context.contig_index >= 0);
-                                assert!(new_context.edge_index >= 0);
-                                new_context.alignment_index += 1;
+                                trace!("Parsed alignment line");
+                                assert!(context.contig_index >= 0);
+                                assert!(context.edge_index >= 0);
+                                context.alignment_index += 1;
                                 alignment_sender
-                                    .send(Wtdbg2CtgLayLineWithContext { line, context })
+                                    .send(Wtdbg2CtgLayLineWithContext {
+                                        line,
+                                        context: context.clone(),
+                                    })
                                     .unwrap();
                             }
                         }
-                        context = new_context;
                     }
                 })
                 .unwrap();
@@ -189,6 +211,8 @@ fn main() {
                         _ => unreachable!("Not an alignment: {line_with_context:?}"),
                     };
                     let mut sequence = Vec::new();
+                    let read_id_string = String::from_utf8(read_id.clone()).unwrap();
+                    trace!("Reading read {read_id_string}");
                     normal_sequence_index.get_sequence(read_id, &mut sequence);
                     decorated_alignment_sender
                         .send((line_with_context, sequence))
@@ -220,6 +244,7 @@ fn main() {
                         sequence,
                     )) = decorated_alignment_receiver.recv()
                     {
+                        trace!("Decompressing {context:?}");
                         let limit = offset + length;
                         let (shifted_offset, shifted_limit) = decompress(offset, limit, &sequence);
                         let shifted_length = shifted_limit - shifted_offset;
@@ -265,13 +290,16 @@ fn main() {
                 while let Ok((Wtdbg2CtgLayLineWithContext { line, context }, shifted_sequence)) =
                     decompressed_alignment_receiver.recv()
                 {
+                    trace!("Received {context:?}");
                     assert!(sorted_lines
                         .insert(context, (line, shifted_sequence))
                         .is_none());
 
                     while let Some(context) = sorted_lines.keys().cloned().next() {
-                        if current_context == context || current_context.directly_precedes(&context)
-                        {
+                        trace!(
+                            "Last context is {current_context:?}, and next known is {context:?}"
+                        );
+                        if current_context.directly_precedes(&context) {
                             let (mut line, shifted_sequence) =
                                 sorted_lines.remove(&context).unwrap();
                             match &mut line {
@@ -324,6 +352,8 @@ fn main() {
                                 }
                             }
                             current_context = context;
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -342,34 +372,22 @@ fn main() {
                 let mut append_file_buffer = vec![0; configuration.io_buffer_size];
                 let mut current_offset = 0;
                 let mut current_last_edge_length = 0;
+                let mut current_contig_line = None;
                 while let Ok((mut line, sequence_and_length)) = output_receiver.recv() {
+                    trace!("Writing line {line:?}");
                     match &mut line {
-                        Wtdbg2CtgLayLine::Contig { length, .. } => {
-                            *length = current_offset + current_last_edge_length;
-                            current_offset = 0;
-                            current_last_edge_length = 0;
-                            output_writer
-                                .write_all(line.to_string().as_bytes())
-                                .unwrap();
-                            output_writer.write_all(&[b'\n']).unwrap();
+                        Wtdbg2CtgLayLine::Contig { .. } => {
+                            tmp_writer = finalise_contig_line(
+                                &mut current_contig_line,
+                                &mut current_offset,
+                                &mut current_last_edge_length,
+                                &mut output_writer,
+                                tmp_writer,
+                                &mut append_file_buffer,
+                                &configuration,
+                            );
 
-                            // Append the tmp file to the actual file, now that we know how long the decompressed contig is.
-                            let mut tmp_file = tmp_writer.into_inner().unwrap();
-                            tmp_file.seek(SeekFrom::Start(0)).unwrap();
-                            loop {
-                                let length = tmp_file.read(&mut append_file_buffer).unwrap();
-                                if length > 0 {
-                                    output_writer
-                                        .write_all(&append_file_buffer[..length])
-                                        .unwrap();
-                                } else {
-                                    break;
-                                }
-                            }
-                            tmp_file.set_len(0).unwrap();
-                            tmp_file.seek(SeekFrom::Start(0)).unwrap();
-                            tmp_writer =
-                                BufWriter::with_capacity(configuration.io_buffer_size, tmp_file);
+                            current_contig_line = Some(line);
                         }
                         Wtdbg2CtgLayLine::Edge { offset, .. } => {
                             current_offset = *offset;
@@ -386,6 +404,16 @@ fn main() {
                         }
                     }
                 }
+
+                finalise_contig_line(
+                    &mut current_contig_line,
+                    &mut current_offset,
+                    &mut current_last_edge_length,
+                    &mut output_writer,
+                    tmp_writer,
+                    &mut append_file_buffer,
+                    &configuration,
+                );
             })
             .unwrap();
     })
@@ -397,7 +425,51 @@ fn main() {
     info!("Done");
 }
 
-pub fn reverse_complement<
+fn finalise_contig_line<OutputWriter: Write>(
+    current_contig_line: &mut Option<Wtdbg2CtgLayLine>,
+    current_offset: &mut u64,
+    current_last_edge_length: &mut u64,
+    output_writer: &mut OutputWriter,
+    mut tmp_writer: BufWriter<File>,
+    append_file_buffer: &mut Vec<u8>,
+    configuration: &Configuration,
+) -> BufWriter<File> {
+    if let Some(mut current_contig_line) = current_contig_line.take() {
+        match &mut current_contig_line {
+            Wtdbg2CtgLayLine::Contig { length, .. } => {
+                *length = *current_offset + *current_last_edge_length;
+                *current_offset = 0;
+                *current_last_edge_length = 0;
+                output_writer
+                    .write_all(current_contig_line.to_string().as_bytes())
+                    .unwrap();
+                output_writer.write_all(&[b'\n']).unwrap();
+
+                // Append the tmp file to the actual file, now that we know how long the decompressed contig is.
+                let mut tmp_file = tmp_writer.into_inner().unwrap();
+                tmp_file.seek(SeekFrom::Start(0)).unwrap();
+                loop {
+                    let length = tmp_file.read(append_file_buffer).unwrap();
+                    if length > 0 {
+                        output_writer
+                            .write_all(&append_file_buffer[..length])
+                            .unwrap();
+                    } else {
+                        break;
+                    }
+                }
+                tmp_file.set_len(0).unwrap();
+                tmp_file.seek(SeekFrom::Start(0)).unwrap();
+                tmp_writer = BufWriter::with_capacity(configuration.io_buffer_size, tmp_file);
+            }
+            _ => unreachable!("Contig line is not a contig line {current_contig_line:?}"),
+        }
+    }
+
+    tmp_writer
+}
+
+fn reverse_complement<
     IntoIter: DoubleEndedIterator<Item = u8>,
     DnaIterator: IntoIterator<Item = u8, IntoIter = IntoIter>,
 >(

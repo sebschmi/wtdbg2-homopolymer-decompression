@@ -206,14 +206,14 @@ impl LineContext {
                 return false;
             }
 
-            self.edge_index == other.previous_contig_edge_count
-                && self.alignment_index == other.previous_edge_alignment_count
+            self.edge_index == other.previous_contig_edge_count - 1
+                && self.alignment_index == other.previous_edge_alignment_count - 1
         } else if self.edge_index != other.edge_index {
             if self.edge_index != other.edge_index - 1 {
                 return false;
             }
 
-            self.alignment_index == other.previous_edge_alignment_count
+            self.alignment_index == other.previous_edge_alignment_count - 1
         } else if self.alignment_index != other.alignment_index {
             if self.alignment_index != other.alignment_index - 1 {
                 return false;
