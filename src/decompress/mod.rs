@@ -10,8 +10,8 @@ pub fn decompress(offset: usize, limit: usize, sequence: &[u8]) -> (usize, usize
             }
 
             // Safety: windows of size 2.
-            //if unsafe { character_window.get_unchecked(0) != character_window.get_unchecked(1) } {
-            if character_window.get(0).unwrap() != character_window.get(1).unwrap() {
+            if unsafe { character_window.get_unchecked(0) != character_window.get_unchecked(1) } {
+                //if character_window.get(0).unwrap() != character_window.get(1).unwrap() {
                 current_offset += 1;
             }
             shifted_offset += 1;
@@ -32,8 +32,8 @@ pub fn decompress(offset: usize, limit: usize, sequence: &[u8]) -> (usize, usize
         }
 
         // Safety: windows of size 2.
-        //if unsafe { character_window.get_unchecked(0) != character_window.get_unchecked(1) } {
-        if character_window.get(0).unwrap() != character_window.get(1).unwrap() {
+        if unsafe { character_window.get_unchecked(0) != character_window.get_unchecked(1) } {
+            //if character_window.get(0).unwrap() != character_window.get(1).unwrap() {
             current_limit += 1;
         }
         shifted_limit += 1;

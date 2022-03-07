@@ -6,7 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-//use std::slice;
+use std::slice;
 
 struct FileSlice {
     offset: u64,
@@ -111,10 +111,10 @@ impl FastaSequenceIndex {
 
     pub fn get_sequence(&mut self, id: &[u8], output: &mut Vec<u8>) {
         let file_slice = self.index.get(id).unwrap();
-        output.resize(file_slice.len, 0);
-        self.file.read_exact_at(output, file_slice.offset).unwrap();
+        //output.resize(file_slice.len, 0);
+        //self.file.read_exact_at(output, file_slice.offset).unwrap();
 
-        /*output.clear();
+        output.clear();
         output.reserve(file_slice.len);
 
         let buffer = output.as_mut_ptr();
@@ -127,6 +127,6 @@ impl FastaSequenceIndex {
                 file_slice.offset,
             )
             .unwrap();
-        *output = unsafe { Vec::from_raw_parts(buffer, file_slice.len, capacity) };*/
+        unsafe { output.set_len(file_slice.len) };
     }
 }
