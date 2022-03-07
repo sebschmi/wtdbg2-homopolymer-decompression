@@ -1,10 +1,20 @@
+use crate::decompress::decompress;
 use crate::fasta_sequence_index::FastaSequenceIndex;
+use crate::wtdbg2_ctg_lay::{LineContext, Wtdbg2CtgLayLine, Wtdbg2CtgLayLineWithContext};
 use clap::Parser;
+use crossbeam::channel;
 use log::{info, LevelFilter};
 use simplelog::{ColorChoice, TermLogger, TerminalMode};
+use std::collections::BTreeMap;
+use std::fs;
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 
+mod decompress;
 mod fasta_sequence_index;
+mod wtdbg2_ctg_lay;
 
 #[derive(Parser)]
 struct Configuration {
@@ -24,14 +34,18 @@ struct Configuration {
     #[clap(long, parse(from_os_str))]
     hoco_reads: PathBuf,
 
-    /// The size of the buffers between threads.
+    /// The size of the queues between threads.
     #[clap(long, default_value = "32768")]
-    buffer_size: usize,
+    queue_size: usize,
+
+    /// The size of the I/O buffers in bytes.
+    #[clap(long, default_value = "67108864")]
+    io_buffer_size: usize,
 
     /// The number of compute threads to use for decompression.
     /// Note that the input and output threads are not counted under this number.
     #[clap(long, default_value = "1")]
-    threads: usize,
+    compute_threads: usize,
 }
 
 fn initialise_logging() {
@@ -52,13 +66,17 @@ fn main() {
     let mut normal_sequence_index_path = configuration.output.clone().into_os_string();
     normal_sequence_index_path.push(".normal_index");
     let normal_sequence_index_path = normal_sequence_index_path;
-    let mut hoco_sequence_index_path = configuration.output.clone().into_os_string();
-    hoco_sequence_index_path.push(".hoco_index");
-    let hoco_sequence_index_path = hoco_sequence_index_path;
+    let mut contig_tmp_path = configuration.output.clone().into_os_string();
+    contig_tmp_path.push(".current_contig");
+    let contig_tmp_path = contig_tmp_path;
+    // Create/open the files here already to abort early if it cannot be created.
+    let tmp_file = File::create(&contig_tmp_path).unwrap();
+    let input_file = File::open(&configuration.input).unwrap();
+    let output_file = File::create(&configuration.output).unwrap();
 
     info!("Building reads sequence indices...");
     // parallel builds seem to be a little faster on my laptop.
-    let (normal_sequence_index, hoco_sequence_index) = crossbeam::scope(|scope| {
+    let mut normal_sequence_index = crossbeam::scope(|scope| {
         let normal_sequence_index = scope
             .builder()
             .name("normal_index_builder_thread".to_string())
@@ -67,35 +85,322 @@ fn main() {
                     configuration.normal_reads,
                     normal_sequence_index_path,
                     scope,
-                    configuration.buffer_size,
+                    configuration.queue_size,
+                    configuration.io_buffer_size,
                 )
-                //FastaSequenceIndex::build(configuration.normal_reads, normal_sequence_index_path)
-            })
-            .unwrap();
-        let hoco_sequence_index = scope
-            .builder()
-            .name("hoco_index_builder_thread".to_string())
-            .spawn(|scope| {
-                FastaSequenceIndex::build_parallel(
-                    configuration.hoco_reads,
-                    hoco_sequence_index_path,
-                    scope,
-                    configuration.buffer_size,
-                )
-                //FastaSequenceIndex::build(configuration.hoco_reads, hoco_sequence_index_path)
+                //FastaSequenceIndex::build(configuration.normal_reads, normal_sequence_index_path, configuration.io_buffer_size)
             })
             .unwrap();
 
-        (
-            normal_sequence_index.join().unwrap(),
-            hoco_sequence_index.join().unwrap(),
-        )
+        normal_sequence_index.join().unwrap()
     })
     .unwrap();
-    info!("Built reads sequence indices");
+    info!("Built read sequence indices");
 
+    info!("Decompressing...");
     crossbeam::scope(|scope| {
-        // TODO
+        // Read input file.
+        let (input_sender, input_receiver) = channel::bounded(configuration.queue_size);
+        scope
+            .builder()
+            .name("input_reader".to_string())
+            .spawn(move |_| {
+                for line in
+                    BufReader::with_capacity(configuration.io_buffer_size, input_file).lines()
+                {
+                    let line = line.unwrap();
+                    input_sender.send(line).unwrap();
+                }
+            })
+            .unwrap();
+
+        // Parse input lines.
+        let (alignment_sender, alignment_receiver) = channel::bounded(configuration.queue_size);
+        let (decompressed_alignment_sender, decompressed_alignment_receiver) =
+            channel::bounded(configuration.queue_size);
+        {
+            let decompressed_alignment_sender = decompressed_alignment_sender.clone();
+            scope
+                .builder()
+                .name("input_parser".to_string())
+                .spawn(move |_| {
+                    let mut context = LineContext::default();
+
+                    while let Ok(input) = input_receiver.recv() {
+                        let line = Wtdbg2CtgLayLine::from_str(&input)
+                            .unwrap_or_else(|_| panic!("Could not parse: {input}"));
+                        let mut new_context = context.clone();
+                        match line {
+                            Wtdbg2CtgLayLine::Contig { .. } => {
+                                new_context.previous_contig_edge_count =
+                                    Some((new_context.edge_index).try_into().unwrap());
+                                new_context.previous_edge_alignment_count =
+                                    Some((new_context.alignment_index).try_into().unwrap());
+                                new_context.contig_index += 1;
+                                new_context.edge_index = 0;
+                                new_context.alignment_index = 0;
+                                decompressed_alignment_sender
+                                    .send((Wtdbg2CtgLayLineWithContext { line, context }, None))
+                                    .unwrap();
+                            }
+                            Wtdbg2CtgLayLine::Edge { .. } => {
+                                new_context.previous_edge_alignment_count =
+                                    Some((new_context.alignment_index).try_into().unwrap());
+                                new_context.edge_index += 1;
+                                new_context.alignment_index = 0;
+                                decompressed_alignment_sender
+                                    .send((Wtdbg2CtgLayLineWithContext { line, context }, None))
+                                    .unwrap();
+                            }
+                            Wtdbg2CtgLayLine::Alignment { .. } => {
+                                new_context.alignment_index += 1;
+                                alignment_sender
+                                    .send(Wtdbg2CtgLayLineWithContext { line, context })
+                                    .unwrap();
+                            }
+                        }
+                        context = new_context;
+                    }
+                })
+                .unwrap();
+        }
+
+        // Decorate alignments with read sequences.
+        let (decorated_alignment_sender, decorated_alignment_receiver) =
+            channel::bounded(configuration.queue_size);
+        scope
+            .builder()
+            .name("read_sequence_reader".to_string())
+            .spawn(move |_| {
+                while let Ok(line_with_context) = alignment_receiver.recv() {
+                    let read_id = match &line_with_context.line {
+                        Wtdbg2CtgLayLine::Alignment { read_id, .. } => read_id,
+                        _ => unreachable!("Not an alignment: {line_with_context:?}"),
+                    };
+                    let mut sequence = Vec::new();
+                    normal_sequence_index.get_sequence(read_id, &mut sequence);
+                    decorated_alignment_sender
+                        .send((line_with_context, sequence))
+                        .unwrap();
+                }
+            })
+            .unwrap();
+
+        // Decompress.
+        for thread_index in 0..configuration.compute_threads {
+            let decorated_alignment_receiver = decorated_alignment_receiver.clone();
+            let decompressed_alignment_sender = decompressed_alignment_sender.clone();
+            scope
+                .builder()
+                .name(format!("decompressor_{thread_index}"))
+                .spawn(move |_| {
+                    while let Ok((
+                        Wtdbg2CtgLayLineWithContext {
+                            line:
+                                Wtdbg2CtgLayLine::Alignment {
+                                    read_id,
+                                    direction,
+                                    offset,
+                                    length,
+                                    original_length,
+                                },
+                            context,
+                        },
+                        sequence,
+                    )) = decorated_alignment_receiver.recv()
+                    {
+                        let limit = offset + length;
+                        let (shifted_offset, shifted_limit) = decompress(offset, limit, &sequence);
+                        let shifted_length = shifted_limit - shifted_offset;
+                        let shifted_sequence = &sequence[shifted_offset..shifted_limit];
+                        decompressed_alignment_sender
+                            .send((
+                                Wtdbg2CtgLayLineWithContext {
+                                    line: Wtdbg2CtgLayLine::Alignment {
+                                        read_id,
+                                        direction,
+                                        offset: shifted_offset,
+                                        length: shifted_length,
+                                        original_length,
+                                    },
+                                    context,
+                                },
+                                Some(if direction {
+                                    shifted_sequence.to_owned()
+                                } else {
+                                    reverse_complement(shifted_sequence.iter().cloned())
+                                }),
+                            ))
+                            .unwrap();
+                    }
+                })
+                .unwrap();
+        }
+
+        // Decompression with multiple threads will shuffle the alignments a bit, so we need to put them back into order.
+        let (output_sender, output_receiver) = channel::bounded(configuration.queue_size);
+        scope
+            .builder()
+            .name("sorter".to_owned())
+            .spawn(move |_| {
+                let mut current_context = LineContext::default();
+                let mut sorted_lines = BTreeMap::new();
+                let mut alignment_count = 0;
+                let mut original_alignment_length_sum = 0;
+                let mut shifted_alignment_length_sum = 0;
+                let mut original_previous_offset = 0;
+                let mut shifted_previous_offset = 0;
+
+                while let Ok((Wtdbg2CtgLayLineWithContext { line, context }, shifted_sequence)) =
+                    decompressed_alignment_receiver.recv()
+                {
+                    assert!(sorted_lines
+                        .insert(context, (line, shifted_sequence))
+                        .is_none());
+
+                    while let Some(context) = sorted_lines.keys().cloned().next() {
+                        if current_context == context || current_context.directly_precedes(&context)
+                        {
+                            let (mut line, shifted_sequence) =
+                                sorted_lines.remove(&context).unwrap();
+                            match &mut line {
+                                Wtdbg2CtgLayLine::Contig { .. } => {
+                                    alignment_count = 0;
+                                    original_alignment_length_sum = 0;
+                                    shifted_alignment_length_sum = 0;
+                                    original_previous_offset = 0;
+                                    shifted_previous_offset = 0;
+                                    assert!(shifted_sequence.is_none());
+                                    output_sender.send((line, None)).unwrap()
+                                }
+                                Wtdbg2CtgLayLine::Edge { offset, .. } => {
+                                    let original_offset = *offset;
+                                    *offset = shifted_previous_offset
+                                        + ((*offset - original_previous_offset) as f64
+                                            * shifted_alignment_length_sum as f64
+                                            / original_alignment_length_sum as f64)
+                                            .round()
+                                            as u64;
+                                    alignment_count = 0;
+                                    original_alignment_length_sum = 0;
+                                    shifted_alignment_length_sum = 0;
+                                    original_previous_offset = original_offset;
+                                    shifted_previous_offset = *offset;
+                                    assert!(shifted_sequence.is_none());
+                                    output_sender.send((line, None)).unwrap()
+                                }
+                                Wtdbg2CtgLayLine::Alignment {
+                                    length,
+                                    original_length,
+                                    ..
+                                } => {
+                                    alignment_count += 1;
+                                    original_alignment_length_sum += *original_length;
+                                    shifted_alignment_length_sum += *length;
+                                    let estimated_length = (shifted_alignment_length_sum as f64
+                                        / alignment_count as f64)
+                                        .round()
+                                        as u64;
+                                    assert!(shifted_sequence.is_some());
+                                    output_sender
+                                        .send((
+                                            line,
+                                            shifted_sequence.map(|shifted_sequence| {
+                                                (shifted_sequence, estimated_length)
+                                            }),
+                                        ))
+                                        .unwrap();
+                                }
+                            }
+                            current_context = context;
+                        }
+                    }
+                }
+            })
+            .unwrap();
+
+        // Write output.
+        scope
+            .builder()
+            .name("output_writer".to_owned())
+            .spawn(move |_| {
+                let mut output_writer =
+                    BufWriter::with_capacity(configuration.io_buffer_size, output_file);
+                let mut tmp_writer =
+                    BufWriter::with_capacity(configuration.io_buffer_size, tmp_file);
+                let mut append_file_buffer = vec![0; configuration.io_buffer_size];
+                let mut current_offset = 0;
+                let mut current_last_edge_length = 0;
+                while let Ok((mut line, sequence_and_length)) = output_receiver.recv() {
+                    match &mut line {
+                        Wtdbg2CtgLayLine::Contig { length, .. } => {
+                            *length = current_offset + current_last_edge_length;
+                            current_offset = 0;
+                            current_last_edge_length = 0;
+                            output_writer
+                                .write_all(line.to_string().as_bytes())
+                                .unwrap();
+                            output_writer.write_all(&[b'\n']).unwrap();
+
+                            // Append the tmp file to the actual file, now that we know how long the decompressed contig is.
+                            let mut tmp_file = tmp_writer.into_inner().unwrap();
+                            tmp_file.seek(SeekFrom::Start(0)).unwrap();
+                            loop {
+                                let length = tmp_file.read(&mut append_file_buffer).unwrap();
+                                if length > 0 {
+                                    output_writer
+                                        .write_all(&append_file_buffer[..length])
+                                        .unwrap();
+                                } else {
+                                    break;
+                                }
+                            }
+                            tmp_file.set_len(0).unwrap();
+                            tmp_file.seek(SeekFrom::Start(0)).unwrap();
+                            tmp_writer =
+                                BufWriter::with_capacity(configuration.io_buffer_size, tmp_file);
+                        }
+                        Wtdbg2CtgLayLine::Edge { offset, .. } => {
+                            current_offset = *offset;
+                            tmp_writer.write_all(line.to_string().as_bytes()).unwrap();
+                            tmp_writer.write_all(&[b'\n']).unwrap();
+                        }
+                        Wtdbg2CtgLayLine::Alignment { .. } => {
+                            let (sequence, edge_length) = sequence_and_length.unwrap();
+                            current_last_edge_length = edge_length;
+
+                            tmp_writer.write_all(line.to_string().as_bytes()).unwrap();
+                            tmp_writer.write_all(&sequence).unwrap();
+                            tmp_writer.write_all(&[b'\n']).unwrap();
+                        }
+                    }
+                }
+            })
+            .unwrap();
     })
     .unwrap();
+
+    // Remove tmp file as it is not needed anymore.
+    fs::remove_file(&contig_tmp_path).unwrap();
+
+    info!("Done")
+}
+
+pub fn reverse_complement<
+    IntoIter: DoubleEndedIterator<Item = u8>,
+    DnaIterator: IntoIterator<Item = u8, IntoIter = IntoIter>,
+>(
+    dna: DnaIterator,
+) -> Vec<u8> {
+    dna.into_iter()
+        .map(|c| match c {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'T' => b'A',
+            b'N' => b'N',
+            other => panic!("Unknown dna character: {other}"),
+        })
+        .rev()
+        .collect()
 }

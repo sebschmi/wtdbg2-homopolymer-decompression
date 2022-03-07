@@ -19,11 +19,14 @@ pub struct FastaSequenceIndex {
 }
 
 impl FastaSequenceIndex {
-    pub fn build<P1: AsRef<Path>, P2: AsRef<Path>>(input_file: P1, tmp_file: P2) -> Self {
-        let reader =
-            fasta::Reader::with_capacity(64 * 1024 * 1024, File::open(input_file).unwrap());
-        let mut writer =
-            BufWriter::with_capacity(64 * 1024 * 1024, File::create(tmp_file).unwrap());
+    #[allow(dead_code)]
+    pub fn build<P1: AsRef<Path>, P2: AsRef<Path>>(
+        input_file: P1,
+        tmp_file: P2,
+        io_buffer_size: usize,
+    ) -> Self {
+        let reader = fasta::Reader::with_capacity(io_buffer_size, File::open(input_file).unwrap());
+        let mut writer = BufWriter::with_capacity(io_buffer_size, File::create(tmp_file).unwrap());
         let mut index = HashMap::new();
 
         let mut offset = 0;
@@ -46,16 +49,16 @@ impl FastaSequenceIndex {
         }
     }
 
+    #[allow(dead_code)]
     pub fn build_parallel<P1: AsRef<Path>, P2: AsRef<Path>>(
         input_file: P1,
         tmp_file: P2,
         scope: &Scope,
         channel_size: usize,
+        io_buffer_size: usize,
     ) -> Self {
-        let reader =
-            fasta::Reader::with_capacity(64 * 1024 * 1024, File::open(input_file).unwrap());
-        let mut writer =
-            BufWriter::with_capacity(64 * 1024 * 1024, File::create(tmp_file).unwrap());
+        let reader = fasta::Reader::with_capacity(io_buffer_size, File::open(input_file).unwrap());
+        let mut writer = BufWriter::with_capacity(io_buffer_size, File::create(tmp_file).unwrap());
         let (sender, receiver) = channel::bounded(channel_size);
 
         // Reader thread.
