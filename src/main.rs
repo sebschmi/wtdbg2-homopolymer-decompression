@@ -26,13 +26,9 @@ struct Configuration {
     #[clap(long, parse(from_os_str))]
     output: PathBuf,
 
-    /// A fasta file containing the normal reads.
+    /// A fasta file containing the normal (uncompressed) reads.
     #[clap(long, parse(from_os_str))]
     normal_reads: PathBuf,
-
-    /// A fasta file containing the homopolymer-compressed reads.
-    #[clap(long, parse(from_os_str))]
-    hoco_reads: PathBuf,
 
     /// The size of the queues between threads.
     #[clap(long, default_value = "32768")]
