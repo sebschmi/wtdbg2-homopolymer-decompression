@@ -163,7 +163,7 @@ impl ToString for Wtdbg2CtgLayLine {
                 name,
                 node_count,
                 length,
-            } => format!(">{name}\tnodes={node_count}\tlen={length}"),
+            } => format!(">{name} nodes={node_count} len={length}"),
             Wtdbg2CtgLayLine::Edge {
                 offset,
                 from_node,
