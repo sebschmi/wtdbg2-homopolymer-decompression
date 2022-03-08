@@ -46,7 +46,7 @@ struct Configuration {
 
 fn initialise_logging() {
     TermLogger::init(
-        LevelFilter::Debug,
+        LevelFilter::Trace,
         Default::default(),
         TerminalMode::Stderr,
         ColorChoice::Auto,

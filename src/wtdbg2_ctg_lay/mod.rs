@@ -213,7 +213,7 @@ impl LineContext {
                 return false;
             }
 
-            self.alignment_index == other.previous_edge_alignment_count - 1
+            self.alignment_index == other.previous_edge_alignment_count - 1 || self.edge_index == -1
         } else if self.alignment_index != other.alignment_index {
             if self.alignment_index != other.alignment_index - 1 {
                 return false;
