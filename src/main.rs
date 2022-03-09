@@ -42,11 +42,15 @@ struct Configuration {
     /// Note that the input and output threads are not counted under this number.
     #[clap(long, default_value = "1")]
     compute_threads: usize,
+
+    /// The level of log messages to be produced.
+    #[clap(long, default_value = "Info")]
+    log_level: LevelFilter,
 }
 
-fn initialise_logging() {
+fn initialise_logging(log_level: &LevelFilter) {
     TermLogger::init(
-        LevelFilter::Trace,
+        *log_level,
         Default::default(),
         TerminalMode::Stderr,
         ColorChoice::Auto,
@@ -57,7 +61,7 @@ fn initialise_logging() {
 
 fn main() {
     let configuration = Configuration::parse();
-    initialise_logging();
+    initialise_logging(&configuration.log_level);
 
     let mut normal_sequence_index_path = configuration.output.clone().into_os_string();
     normal_sequence_index_path.push(".normal_index");
