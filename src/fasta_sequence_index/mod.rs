@@ -97,7 +97,11 @@ impl FastaSequenceIndex {
                 let previous =
                     index.insert(record.id().as_bytes().to_vec(), FileSlice { offset, len });
                 offset += u64::try_from(len).unwrap() + 1;
-                assert!(previous.is_none());
+                assert!(
+                    previous.is_none(),
+                    "found duplicate read id: {}",
+                    record.id()
+                );
             }
             (writer, index)
         });

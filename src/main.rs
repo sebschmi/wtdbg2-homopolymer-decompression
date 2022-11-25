@@ -295,7 +295,7 @@ fn main() {
                         .insert(context, (line, shifted_sequence))
                         .is_none());
 
-                    while let Some(context) = sorted_lines.keys().cloned().next() {
+                    while let Some(context) = sorted_lines.keys().next().cloned() {
                         trace!(
                             "Last context is {current_context:?}, and next known is {context:?}"
                         );
@@ -431,7 +431,7 @@ fn finalise_contig_line<OutputWriter: Write>(
     current_last_edge_length: &mut u64,
     output_writer: &mut OutputWriter,
     mut tmp_writer: BufWriter<File>,
-    append_file_buffer: &mut Vec<u8>,
+    append_file_buffer: &mut [u8],
     configuration: &Configuration,
 ) -> BufWriter<File> {
     if let Some(mut current_contig_line) = current_contig_line.take() {
